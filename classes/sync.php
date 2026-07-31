@@ -25,8 +25,9 @@
 namespace local_busnippets;
 
 use context_system;
-use core\exception\moodle_exception;
 use file_storage;
+use moodle_exception;
+use stdClass;
 use theme_boost_union\snippets;
 
 /**
@@ -58,19 +59,20 @@ class sync {
     /** @var int The maximum time in seconds which the download of the archive may take. */
     const DOWNLOAD_TIMEOUT = 300;
 
-    /** @var bool Whether progress information is written with mtrace(). */
-    protected $verbose;
+    /** @var callable|null A callback which receives progress messages. */
+    protected $output;
 
-    /** @var string[] Collected log lines of the current run. */
-    protected $log = [];
+    /** @var stdClass|null The plugin configuration of the current run. */
+    protected $config = null;
 
     /**
      * Constructor.
      *
-     * @param bool $verbose Whether progress information should be written with mtrace().
+     * @param callable|null $output A callback which receives progress messages, for example 'mtrace'.
+     *                              Pass null to stay quiet, which is what the unit tests do.
      */
-    public function __construct(bool $verbose = false) {
-        $this->verbose = $verbose;
+    public function __construct(?callable $output = null) {
+        $this->output = $output;
     }
 
     /**
@@ -80,28 +82,73 @@ class sync {
      * are only reset if a snippet was really added, updated or removed. Running this repeatedly
      * without a change in the snippets repository is therefore cheap.
      *
-     * @return \stdClass An object with the counters 'added', 'updated', 'unchanged', 'removed',
-     *                   'skipped' and the boolean 'changed', or null if the sync did not run.
+     * @return stdClass|null An object with the counters 'added', 'updated', 'unchanged', 'removed',
+     *                       the boolean 'changed' and the array 'enabled', or null if the sync did not run.
      */
-    public function run(): ?\stdClass {
+    public function run(): ?stdClass {
         global $CFG;
 
         // The curl class, the file packer and the file storage all live in filelib.php,
         // which is not loaded automatically in every context this can be called from.
         require_once($CFG->libdir . '/filelib.php');
 
-        $config = get_config('local_busnippets');
+        $this->config = get_config('local_busnippets');
 
-        // Check whether the sync is switched on at all.
-        if (empty($config->enabled)) {
-            $this->log(get_string('syncdisabled', 'local_busnippets'));
+        if (!$this->is_runnable()) {
             return null;
         }
 
+        // Fetch the archive and collect the snippets which it contains.
+        $archivefile = $this->download_archive(
+            $this->resolve_placeholders($this->config->archiveurl),
+            $this->config->token ?? ''
+        );
+        $collector = new snippet_collector(fn(string $message) => $this->log($message));
+        $snippetfiles = $collector->collect_from_archive(
+            $archivefile,
+            $this->resolve_placeholders($this->config->subdirectory ?? '')
+        );
+        $this->log(get_string('syncfound', 'local_busnippets', count($snippetfiles)));
+
+        // Write them into the Boost Union file area.
+        $result = $this->store_snippets($snippetfiles);
+
+        // Let Boost Union register the snippets and rebuild the CSS, but only if needed.
+        if ($result->changed) {
+            $result->enabled = $this->register_snippets();
+        } else {
+            $result->enabled = [];
+            $this->log(get_string('syncnochange', 'local_busnippets'));
+        }
+
+        // Remember the outcome so that it can be shown on the settings page.
+        set_config(
+            self::CONFIG_LASTRUN,
+            json_encode(['time' => time(), 'result' => $result]),
+            'local_busnippets'
+        );
+
+        return $result;
+    }
+
+    /**
+     * Check whether the sync is configured well enough to run at all.
+     *
+     * @return bool Whether the sync should run.
+     */
+    protected function is_runnable(): bool {
+        global $CFG;
+
+        // Check whether the sync is switched on at all.
+        if (empty($this->config->enabled)) {
+            $this->log(get_string('syncdisabled', 'local_busnippets'));
+            return false;
+        }
+
         // Without an archive URL there is nothing to fetch.
-        if (empty($config->archiveurl)) {
+        if (empty($this->config->archiveurl)) {
             $this->log(get_string('syncnourl', 'local_busnippets'));
-            return null;
+            return false;
         }
 
         // The whole plugin is useless without Boost Union. This is covered by the plugin
@@ -118,34 +165,29 @@ class sync {
             $this->log(get_string('syncuploadeddisabled', 'local_busnippets'));
         }
 
-        // Fetch and unpack the archive.
-        $archivefile = $this->download_archive($config->archiveurl, $config->token ?? '');
-        $archivedir = $this->extract_archive($archivefile);
+        return true;
+    }
 
-        // Collect the snippets from the unpacked archive.
-        $snippetfiles = $this->collect_snippets($archivedir, $config->subdirectory ?? '');
-        $this->log(get_string('syncfound', 'local_busnippets', count($snippetfiles)));
+    /**
+     * Replace the Moodle version placeholders in a setting value.
+     *
+     * SCSS snippets carry no information about the Moodle version they were written for, and
+     * Boost Union applies every enabled snippet regardless of the Moodle version. A snippet which
+     * targets the markup of one Moodle version can therefore do nothing or even the wrong thing on
+     * another one. These placeholders let a single setting value serve sites on different Moodle
+     * versions, by pointing each of them at the matching branch or folder of the repository.
+     *
+     * @param string $value The configured value.
+     * @return string The value with the placeholders replaced.
+     */
+    protected function resolve_placeholders(string $value): string {
+        global $CFG;
 
-        // Write them into the Boost Union file area.
-        $result = $this->store_snippets($snippetfiles, !empty($config->removeorphans));
-
-        // Let Boost Union register the snippets and rebuild the CSS, but only if needed.
-        if ($result->changed) {
-            $newnames = $this->register_snippets(!empty($config->autoenable));
-            $result->enabled = $newnames;
-        } else {
-            $result->enabled = [];
-            $this->log(get_string('syncnochange', 'local_busnippets'));
-        }
-
-        // Remember the outcome so that it can be shown on the settings page.
-        set_config(
-            self::CONFIG_LASTRUN,
-            json_encode(['time' => time(), 'result' => $result]),
-            'local_busnippets'
+        return str_replace(
+            ['{moodlebranch}', '{moodleversion}'],
+            ['MOODLE_' . $CFG->branch . '_STABLE', $CFG->branch],
+            $value
         );
-
-        return $result;
     }
 
     /**
@@ -186,148 +228,14 @@ class sync {
     }
 
     /**
-     * Unpack the downloaded archive into a temporary directory.
-     *
-     * @param string $archivefile The path of the downloaded archive.
-     * @return string The path of the directory with the unpacked archive.
-     */
-    protected function extract_archive(string $archivefile): string {
-        $packer = get_file_packer('application/zip');
-        $extractdir = make_request_directory(false);
-        $extracted = $packer->extract_to_pathname($archivefile, $extractdir);
-
-        // The temporary download is not needed anymore in any case.
-        @unlink($archivefile);
-
-        if (!$extracted) {
-            throw new moodle_exception('errornozip', 'local_busnippets');
-        }
-
-        return $extractdir;
-    }
-
-    /**
-     * Collect all valid SCSS snippets from the unpacked archive.
-     *
-     * The folder structure within the archive is not relevant, just as it is not relevant when an
-     * admin uploads a snippets ZIP archive by hand. Only the file name identifies a snippet.
-     *
-     * @param string $archivedir The path of the directory with the unpacked archive.
-     * @param string $subdirectory An optional path within the archive to restrict the sync to.
-     * @return array An array of snippets, keyed by file name, each with the keys 'path' and 'preview'.
-     */
-    protected function collect_snippets(string $archivedir, string $subdirectory): array {
-        $subdirectory = trim($subdirectory, '/');
-
-        $iterator = new \RecursiveIteratorIterator(
-            new \RecursiveDirectoryIterator($archivedir, \FilesystemIterator::SKIP_DOTS)
-        );
-
-        $snippets = [];
-        foreach ($iterator as $fileinfo) {
-            if (!$fileinfo->isFile() || strtolower($fileinfo->getExtension()) !== 'scss') {
-                continue;
-            }
-
-            // The path within the archive, without the wrapping folder which GitHub and GitLab
-            // add to their archives.
-            $relativepath = $this->get_archive_path($archivedir, $fileinfo->getPathname());
-
-            // Ignore the boilerplate file of the snippets repository, just as Boost Union does.
-            if (str_contains($relativepath, 'boilerplate/boilerplate.scss')) {
-                continue;
-            }
-
-            // Honour an optional subdirectory restriction.
-            if ($subdirectory !== '' && !str_starts_with($relativepath, $subdirectory . '/')) {
-                continue;
-            }
-
-            $filename = $fileinfo->getFilename();
-            $content = file_get_contents($fileinfo->getPathname());
-
-            // Let Boost Union decide whether this is a valid snippet. This is the very same
-            // check which Boost Union runs on a manually uploaded file.
-            if ($content === false || !snippets::get_snippet_meta_from_file_content($content)) {
-                $this->log(get_string('syncskippedinvalid', 'local_busnippets', $relativepath));
-                continue;
-            }
-
-            // Snippets are identified by their file name alone, so a name must not appear twice.
-            if (isset($snippets[$filename])) {
-                $this->log(get_string('syncskippedduplicate', 'local_busnippets', $relativepath));
-                continue;
-            }
-
-            $snippets[$filename] = [
-                'path' => $fileinfo->getPathname(),
-                'preview' => $this->find_preview_file($fileinfo->getPathname()),
-            ];
-        }
-
-        ksort($snippets);
-
-        return $snippets;
-    }
-
-    /**
-     * Get the path of a file relative to the archive root.
-     *
-     * Archives which are downloaded from GitHub or GitLab wrap the whole repository into a single
-     * folder which is named after the repository and the ref. This folder is stripped here so that
-     * the subdirectory setting can be written as it looks in the repository.
-     *
-     * @param string $archivedir The path of the directory with the unpacked archive.
-     * @param string $fullpath The full path of the file.
-     * @return string The path of the file relative to the archive root.
-     */
-    protected function get_archive_path(string $archivedir, string $fullpath): string {
-        $relativepath = ltrim(substr($fullpath, strlen($archivedir)), '/');
-
-        // If the archive consists of exactly one top level folder, treat this folder as the root.
-        $toplevel = glob($archivedir . '/*');
-        if (is_array($toplevel) && count($toplevel) === 1 && is_dir($toplevel[0])) {
-            $wrapper = basename($toplevel[0]) . '/';
-            if (str_starts_with($relativepath, $wrapper)) {
-                $relativepath = substr($relativepath, strlen($wrapper));
-            }
-        }
-
-        return $relativepath;
-    }
-
-    /**
-     * Search for the preview image which belongs to a snippet.
-     *
-     * Boost Union expects the preview image to sit next to the snippet and to carry the same
-     * base name, just with an image file extension.
-     *
-     * @param string $snippetpath The full path of the snippet file.
-     * @return string|null The full path of the preview image, or null if there is none.
-     */
-    protected function find_preview_file(string $snippetpath): ?string {
-        $basepath = substr($snippetpath, 0, -strlen('.scss'));
-
-        foreach (snippets::ALLOWED_PREVIEW_FILE_EXTENSIONS as $extension) {
-            $candidate = $basepath . '.' . $extension;
-            if (is_readable($candidate)) {
-                return $candidate;
-            }
-        }
-
-        return null;
-    }
-
-    /**
      * Write the collected snippets into the Boost Union file area.
      *
-     * @param array $snippetfiles The collected snippets as returned by collect_snippets().
-     * @param bool $removeorphans Whether snippets which vanished from the archive should be removed.
-     * @return \stdClass The counters of this run.
+     * @param array $snippetfiles The collected snippets as returned by the snippet collector.
+     * @return stdClass The counters of this run.
      */
-    protected function store_snippets(array $snippetfiles, bool $removeorphans): \stdClass {
+    protected function store_snippets(array $snippetfiles): stdClass {
         $fs = get_file_storage();
-        $systemcontext = context_system::instance();
+        $contextid = context_system::instance()->id;
 
         $result = (object) [
             'added' => 0,
@@ -340,39 +248,18 @@ class sync {
         $managed = [];
 
         foreach ($snippetfiles as $filename => $snippet) {
-            $managed[] = $filename;
+            $stored = $this->store_snippet($fs, $contextid, $filename, $snippet, $managed);
 
-            // Store the snippet itself.
-            $status = $this->store_file($fs, $systemcontext->id, $filename, $snippet['path']);
-            if ($status === 'added') {
-                $result->added++;
-                $this->log(get_string('syncadded', 'local_busnippets', $filename));
-            } else if ($status === 'updated') {
-                $result->updated++;
-                $this->log(get_string('syncupdated', 'local_busnippets', $filename));
-            } else {
-                $result->unchanged++;
+            $result->{$stored['status']}++;
+            if ($stored['status'] !== 'unchanged' || $stored['previewchanged']) {
+                $result->changed = true;
             }
-
-            // Store the preview image, if there is one.
-            if ($snippet['preview'] !== null) {
-                $previewname = basename($snippet['preview']);
-                $managed[] = $previewname;
-                $previewstatus = $this->store_file($fs, $systemcontext->id, $previewname, $snippet['preview']);
-                if ($previewstatus !== 'unchanged') {
-                    $result->changed = true;
-                }
-            }
-        }
-
-        if ($result->added > 0 || $result->updated > 0) {
-            $result->changed = true;
         }
 
         // Remove the files which this plugin wrote in an earlier run but which are not part of
         // the archive anymore. Files which were uploaded by an admin by hand are never touched.
-        if ($removeorphans) {
-            $result->removed = $this->remove_orphans($fs, $systemcontext->id, $managed);
+        if (!empty($this->config->removeorphans)) {
+            $result->removed = $this->remove_orphans($fs, $contextid, $managed);
             if ($result->removed > 0) {
                 $result->changed = true;
             }
@@ -385,15 +272,51 @@ class sync {
     }
 
     /**
+     * Write a single snippet and its preview image into the Boost Union file area.
+     *
+     * @param file_storage $fs The file storage.
+     * @param int $contextid The id of the system context.
+     * @param string $filename The file name of the snippet.
+     * @param array $snippet The snippet with the keys 'path' and 'preview'.
+     * @param array $managed The list of managed file names, extended by this method.
+     * @return array An array with the keys 'status' and 'previewchanged'.
+     */
+    protected function store_snippet(
+        file_storage $fs,
+        int $contextid,
+        string $filename,
+        array $snippet,
+        array &$managed
+    ): array {
+        $managed[] = $filename;
+
+        $status = $this->store_file($fs, $contextid, $filename, $snippet['path']);
+        if ($status === 'added') {
+            $this->log(get_string('syncadded', 'local_busnippets', $filename));
+        } else if ($status === 'updated') {
+            $this->log(get_string('syncupdated', 'local_busnippets', $filename));
+        }
+
+        $previewchanged = false;
+        if ($snippet['preview'] !== null) {
+            $previewname = basename($snippet['preview']);
+            $managed[] = $previewname;
+            $previewchanged = $this->store_file($fs, $contextid, $previewname, $snippet['preview']) !== 'unchanged';
+        }
+
+        return ['status' => $status, 'previewchanged' => $previewchanged];
+    }
+
+    /**
      * Store a single file in the Boost Union file area, if its content has changed.
      *
-     * @param \file_storage $fs The file storage.
+     * @param file_storage $fs The file storage.
      * @param int $contextid The id of the system context.
      * @param string $filename The name of the file.
      * @param string $sourcepath The full path of the source file.
      * @return string One of 'added', 'updated' or 'unchanged'.
      */
-    protected function store_file(\file_storage $fs, int $contextid, string $filename, string $sourcepath): string {
+    protected function store_file(file_storage $fs, int $contextid, string $filename, string $sourcepath): string {
         $existing = $fs->get_file(
             $contextid,
             self::SNIPPETS_COMPONENT,
@@ -404,8 +327,7 @@ class sync {
         );
 
         // Compare the content so that unchanged files do not trigger a theme cache reset.
-        $sourcehash = file_storage::hash_from_path($sourcepath);
-        if ($existing && $existing->get_contenthash() === $sourcehash) {
+        if ($existing && $existing->get_contenthash() === file_storage::hash_from_path($sourcepath)) {
             return 'unchanged';
         }
 
@@ -431,12 +353,12 @@ class sync {
     /**
      * Remove the files which this plugin wrote earlier but which are not in the archive anymore.
      *
-     * @param \file_storage $fs The file storage.
+     * @param file_storage $fs The file storage.
      * @param int $contextid The id of the system context.
      * @param array $current The file names which were written in this run.
      * @return int The number of removed files.
      */
-    protected function remove_orphans(\file_storage $fs, int $contextid, array $current): int {
+    protected function remove_orphans(file_storage $fs, int $contextid, array $current): int {
         $previous = json_decode(get_config('local_busnippets', self::CONFIG_MANAGEDFILES) ?: '[]');
         if (!is_array($previous)) {
             return 0;
@@ -465,10 +387,9 @@ class sync {
     /**
      * Let Boost Union register the synced snippets and rebuild the theme CSS.
      *
-     * @param bool $autoenable Whether snippets which are new to this site should be enabled.
      * @return string[] The names of the snippets which were enabled by this run.
      */
-    protected function register_snippets(bool $autoenable): array {
+    protected function register_snippets(): array {
         global $DB;
 
         // Remember which snippets Boost Union knew before, to be able to spot the new ones.
@@ -484,25 +405,7 @@ class sync {
         snippets::parse_uploaded_snippets();
         snippets::cleanup_snippets();
 
-        $enabled = [];
-        if ($autoenable) {
-            $after = $DB->get_fieldset_select(
-                'theme_boost_union_snippets',
-                'name',
-                'source = ?',
-                [snippets::SOURCE_UPLOADED]
-            );
-            foreach (array_diff($after, $before) as $name) {
-                $DB->set_field(
-                    'theme_boost_union_snippets',
-                    'enabled',
-                    1,
-                    ['name' => $name, 'source' => snippets::SOURCE_UPLOADED]
-                );
-                $enabled[] = $name;
-                $this->log(get_string('syncenabled', 'local_busnippets', $name));
-            }
-        }
+        $enabled = $this->enable_new_snippets($before);
 
         theme_reset_all_caches();
 
@@ -510,24 +413,52 @@ class sync {
     }
 
     /**
-     * Add a line to the log of this run.
+     * Switch on the snippets which arrived on this site for the first time.
+     *
+     * Snippets which this site already knew keep the state which an admin gave them, so that
+     * switching a snippet off on a site is never overruled by a later sync.
+     *
+     * @param array $before The snippet names which were known before the snippets were registered.
+     * @return string[] The names of the snippets which were enabled.
+     */
+    protected function enable_new_snippets(array $before): array {
+        global $DB;
+
+        if (empty($this->config->autoenable)) {
+            return [];
+        }
+
+        $after = $DB->get_fieldset_select(
+            'theme_boost_union_snippets',
+            'name',
+            'source = ?',
+            [snippets::SOURCE_UPLOADED]
+        );
+
+        $enabled = [];
+        foreach (array_diff($after, $before) as $name) {
+            $DB->set_field(
+                'theme_boost_union_snippets',
+                'enabled',
+                1,
+                ['name' => $name, 'source' => snippets::SOURCE_UPLOADED]
+            );
+            $enabled[] = $name;
+            $this->log(get_string('syncenabled', 'local_busnippets', $name));
+        }
+
+        return $enabled;
+    }
+
+    /**
+     * Pass a message on to the configured output callback.
      *
      * @param string $message The message.
      * @return void
      */
     protected function log(string $message): void {
-        $this->log[] = $message;
-        if ($this->verbose) {
-            mtrace($message);
+        if ($this->output !== null) {
+            ($this->output)($message);
         }
-    }
-
-    /**
-     * Get the collected log lines of this run.
-     *
-     * @return string[]
-     */
-    public function get_log(): array {
-        return $this->log;
     }
 }

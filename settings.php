@@ -50,6 +50,13 @@ if ($hassiteconfig) {
         }
     }
 
+    // The two settings below document the Moodle version placeholders, so they need to show
+    // which branch and version the placeholders resolve to on this very site.
+    $placeholders = (object) [
+        'branch' => 'MOODLE_' . $CFG->branch . '_STABLE',
+        'version' => $CFG->branch,
+    ];
+
     // Setting: Enable the sync.
     $settings->add(new admin_setting_configcheckbox(
         'local_busnippets/enabled',
@@ -62,7 +69,7 @@ if ($hassiteconfig) {
     $settings->add(new admin_setting_configtext(
         'local_busnippets/archiveurl',
         get_string('archiveurl', 'local_busnippets'),
-        get_string('archiveurl_desc', 'local_busnippets'),
+        get_string('archiveurl_desc', 'local_busnippets', $placeholders),
         '',
         PARAM_URL,
         60
@@ -80,7 +87,7 @@ if ($hassiteconfig) {
     $settings->add(new admin_setting_configtext(
         'local_busnippets/subdirectory',
         get_string('subdirectory', 'local_busnippets'),
-        get_string('subdirectory_desc', 'local_busnippets'),
+        get_string('subdirectory_desc', 'local_busnippets', $placeholders),
         '',
         PARAM_PATH,
         60
@@ -127,7 +134,7 @@ if ($hassiteconfig) {
 
                 // Tell the admin whether the sync is actually running and where to configure it.
                 $syncenabled = (bool) get_config('local_busnippets', 'enabled');
-                $settingsurl = (new \core\url('/admin/settings.php', ['section' => 'local_busnippets']))->out();
+                $settingsurl = (new \moodle_url('/admin/settings.php', ['section' => 'local_busnippets']))->out();
                 $notification = new \core\output\notification(
                     get_string($syncenabled ? 'snippetsnoticeon' : 'snippetsnoticeoff', 'local_busnippets', $settingsurl),
                     $syncenabled ? \core\output\notification::NOTIFY_INFO : \core\output\notification::NOTIFY_WARNING,

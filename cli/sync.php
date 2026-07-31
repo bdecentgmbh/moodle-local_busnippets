@@ -56,7 +56,7 @@ Example:
     exit(0);
 }
 
-$sync = new \local_busnippets\sync(true);
+$sync = new \local_busnippets\sync('mtrace');
 $result = $sync->run();
 
 if ($result === null) {

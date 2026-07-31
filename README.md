@@ -10,7 +10,7 @@ upload a ZIP archive by hand.
 
 - **Plugin type:** `local`
 - **Component:** `local_busnippets`
-- **Requires:** Moodle **5.0** or later, and `theme_boost_union`
+- **Requires:** Moodle **4.5** or later (tested up to 5.2), and `theme_boost_union`
 - **Maturity:** ALPHA (`v0.1.0-alpha`)
 - **Author:** bdecent GmbH — <https://bdecent.de>
 - **License:** [GNU GPL v3 or later](https://www.gnu.org/copyleft/gpl.html)
@@ -53,9 +53,6 @@ file name identifies a snippet. The wrapping folder which GitHub and GitLab add 
 is stripped automatically, so the *Subdirectory* setting can be written the way the path looks in
 your repository.
 
-[`moodle-theme_bdecent_union_snippets`](https://github.com/bdecentgmbh/moodle-theme_bdecent_union_snippets)
-is such a repository and can be used as a template for your own one.
-
 A snippet needs the metadata header from the
 [boilerplate](https://github.com/moodle-an-hochschulen/moodle-theme_boost_union_snippets/blob/main/boilerplate/boilerplate.scss);
 `Snippet Title` is the only field which is strictly required. Files without it are skipped, and so
@@ -69,7 +66,7 @@ name and one of the extensions `webp`, `png`, `jpg`, `jpeg` or `gif`, is synced 
 | Setting | Meaning |
 |---|---|
 | Enable snippet sync | Master switch. While off, the task does nothing and already synced snippets stay untouched. |
-| Archive URL | URL of the ZIP archive, e.g. `https://github.com/bdecentgmbh/moodle-theme_bdecent_union_snippets/archive/refs/heads/main.zip`. |
+| Archive URL | URL of the ZIP archive, e.g. `https://github.com/<owner>/<repo>/archive/refs/heads/main.zip`. |
 | Access token | Optional. Sent as `Authorization: Bearer <token>`, for private repositories. |
 | Subdirectory | Optional. Sync only a part of the repository, e.g. `snippets`. |
 | Enable new snippets automatically | Enables snippets which arrive on this site for the first time. Snippets which are already known keep their state, so switching one off on a site is never overruled. |
@@ -77,6 +74,31 @@ name and one of the extensions `webp`, `png`, `jpg`, `jpeg` or `gif`, is synced 
 
 The plugin also adds a notice to the *Uploaded snippets* section of Boost Union's SCSS snippets
 settings page, so that admins can see where the extra snippets came from.
+
+## Snippets and Moodle versions
+
+SCSS snippets carry no version information. Boost Union's snippet metadata has no version field —
+`Tested on` is free text which is shown to admins but never evaluated — and every enabled snippet
+is applied regardless of the Moodle version a site runs. Since snippets depend on Moodle's core
+markup, a snippet written for 5.2 can do nothing, or the wrong thing, on 4.5.
+
+To serve sites on different Moodle versions from one repository, use these placeholders in the
+*Archive URL* and *Subdirectory* settings:
+
+| Placeholder | Replaced with | Example on Moodle 4.5 |
+|---|---|---|
+| `{moodlebranch}` | The Moodle branch name | `MOODLE_405_STABLE` |
+| `{moodleversion}` | The Moodle version number | `405` |
+
+So either branch your snippets repository per Moodle version and use
+
+```
+https://github.com/<owner>/<repo>/archive/refs/heads/{moodlebranch}.zip
+```
+
+or keep one folder per version in a single branch and put `{moodleversion}` into *Subdirectory*.
+Either way, the same setting value can be rolled out to every site and each one pulls the
+snippets which fit its own Moodle version.
 
 ## Running it
 

@@ -50,7 +50,7 @@ class sync_snippets extends scheduled_task {
      * @return void
      */
     public function execute(): void {
-        $sync = new sync(true);
+        $sync = new sync('mtrace');
         $result = $sync->run();
 
         if ($result === null) {

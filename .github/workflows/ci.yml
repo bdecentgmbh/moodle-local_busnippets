@@ -7,8 +7,11 @@ jobs:
     runs-on: ubuntu-latest
 
     services:
+      # One database service serves every branch of the matrix, so it has to satisfy the
+      # strictest requirement in it. Moodle 5.2 asks for PostgreSQL 16 and MariaDB 10.11,
+      # and Moodle declares no upper bounds, so these versions work for Moodle 4.5 as well.
       postgres:
-        image: postgres:14
+        image: postgres:16
         env:
           POSTGRES_USER: 'postgres'
           POSTGRES_HOST_AUTH_METHOD: 'trust'
@@ -74,7 +77,6 @@ jobs:
         uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
-          extensions: ${{ matrix.extensions }}
           ini-values: max_input_vars=5000
           coverage: none
 

@@ -10,7 +10,7 @@ upload a ZIP archive by hand.
 
 - **Plugin type:** `local`
 - **Component:** `local_busnippets`
-- **Requires:** Moodle **4.5** or later (tested up to 5.2), and `theme_boost_union`
+- **Requires:** Moodle **4.5** or later (tested on 4.5, 5.1, 5.2 and 5.3), and `theme_boost_union`
 - **Maturity:** ALPHA (`v0.1.0-alpha`)
 - **Author:** bdecent GmbH — <https://bdecent.de>
 - **License:** [GNU GPL v3 or later](https://www.gnu.org/copyleft/gpl.html)

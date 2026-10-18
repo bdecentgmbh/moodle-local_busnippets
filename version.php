@@ -26,7 +26,7 @@ defined('MOODLE_INTERNAL') || die();
 
 $plugin->version = 2026073101;              // The current plugin version (Date: YYYYMMDDXX).
 $plugin->requires = 2024100700;             // Requires this Moodle version (4.5).
-$plugin->supported = [405, 502];            // Supported Moodle versions (4.5 up to 5.2).
+$plugin->supported = [405, 503];            // Supported Moodle versions (4.5 up to 5.3).
 $plugin->component = 'local_busnippets';    // Full name of the plugin (used for diagnostics).
 $plugin->maturity = MATURITY_ALPHA;
 $plugin->release = 'v0.1.0-alpha';
